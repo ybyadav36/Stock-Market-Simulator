@@ -1,0 +1,13 @@
+# Virtual environment
+venv/
+
+# Docker
+docker-compose.yml
+Dockerfile
+
+# IDE/Editor files
+.vscode/
+.idea/
+
+# Local data files (if any)
+data/
