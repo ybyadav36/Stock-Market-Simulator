@@ -10,7 +10,7 @@ from pymongo import MongoClient
 api_key = os.getenv("VZ480LSCAC63VPLG")
 
 # MongoDB Connection (using container name and port)
-client = MongoClient('mongodb://localhost:27017/')  # Assuming default port
+client = MongoClient('mongodb://localhost:27017/')  
 db = client['my-mongodb-container']  # Database name
 
 # Collection Creation (with error handling)
