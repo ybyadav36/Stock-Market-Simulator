@@ -20,7 +20,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/5.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-sp9pfpt4$_#40^--l5o_&_fw3)k-#rwga4c7%qbi(t6+ko)mro'
+SECRET_KEY = 'django-insecure-zh59nz(yto&vk-a09c7rnemp-uen07k1qt2z=*(+m!**9cfu55'
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
@@ -75,12 +75,8 @@ WSGI_APPLICATION = 'stock_market_simulator.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'Simulator',
-        'USER': 'ybyadav36',
-        'PASSWORD': '20April98@#$',
-        'HOST': 'localhost',
-        'PORT': '5432',
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': BASE_DIR / 'db.sqlite3',
     }
 }
 
