@@ -1,85 +1,114 @@
-import os
 import time
-import pymongo
+import logging
 import requests
-import json
+from confluent_kafka import Producer, KafkaError
 import pandas as pd
 from pymongo import MongoClient
 
-# Alpha Vantage API Key
-api_key = os.getenv("VZ480LSCAC63VPLG")
+# Alpha Vantage rate limit: 5 calls per minute
+ALPHA_VANTAGE_RATE_LIMIT = 5
+ALPHA_VANTAGE_TIME_INTERVAL = 60  # seconds
 
-# MongoDB Connection (using container name and port)
-client = MongoClient('mongodb://localhost:27017/')  
-db = client['my-mongodb-container']  # Database name
+# Kafka configuration
+KAFKA_BROKER = 'localhost:9092'  # Update with your Kafka broker details
+KAFKA_TOPIC = 'stock-data'  # Update with your Kafka topic name
 
-# Collection Creation (with error handling)
-daily_collection = db['stock-prices-daily']
-try:
-    daily_collection.create_index([('symbol', 1)], unique=True)  # Ensure unique symbols
-except pymongo.errors.CollectionInvalid:
-    print("Collection 'stock-prices-daily' already exists.")
+# MongoDB connection
+MONGO_URI = "mongodb://localhost:27017"
+MONGO_DB = "my-mongodb-container"
+MONGO_COLLECTION = "daily_stock_data"
 
-intraday_collection = db['stock-prices-intraday']
-try:
-    intraday_collection.create_index([('symbol', 1)], unique=True)  # Ensure unique symbols
-except pymongo.errors.CollectionInvalid:
-    print("Collection 'stock-prices-intraday' already exists.")
+# Initialize variables for rate limiting
+alpha_vantage_calls = 0
+alpha_vantage_last_reset_time = time.time()
 
-# Alpha Vantage API Endpoint for Daily Time Series Data
-alpha_vantage_url_daily = "https://www.alphavantage.co/query"
-symbol = "MSFT"  # Example symbol, can be changed
-function = "TIME_SERIES_DAILY"
-params = {
-    "function": function,
-    "symbol": symbol,
-    "apikey": api_key,
+# Initialize Kafka Producer
+kafka_producer_config = {
+    'bootstrap.servers': KAFKA_BROKER,
 }
 
-# Alpha Vantage API Endpoint for Intraday Time Series Data
-alpha_vantage_url_intraday = "https://www.alphavantage.co/query"
-symbol = "MSFT"  # Example symbol, can be changed
-function = "TIME_SERIES_INTRADAY"
-interval = "1min"  # Interval can be changed to 5min, 15min, 30min, or 60min
-params = {
-    "function": function,
-    "symbol": symbol,
-    "interval": interval,
-    "apikey": api_key,
-}
+producer = Producer(kafka_producer_config)
 
-# Rate limiting to 5 API calls per minute
-time.sleep(12)  # Sleep for 12 seconds to ensure we don't exceed 5 API calls per minute
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Make API request to Alpha Vantage for Daily Time Series Data
-response = requests.get(alpha_vantage_url_daily, params=params)
+def get_daily_data(symbol, outputsize='compact'):
+    global alpha_vantage_calls, alpha_vantage_last_reset_time
 
-if response.status_code == 200:
-    data = response.json().get("Time Series (Daily)")
-    df = pd.DataFrame.from_dict(data, orient='index')
-    df.index.name = 'date'
-    df.reset_index(inplace=True)
-    df['symbol'] = symbol
-    df['type'] = 'daily'
-    df.to_json('stock_prices.json', orient='records')
+    api_key = '1DMX8XAI11JYVQC5'
+    base_url = 'https://www.alphavantage.co/query'
+    function = 'TIME_SERIES_DAILY'
 
-    # Insert data into MongoDB
-    daily_collection.insert_many(df.to_dict('records'))
+    current_time = time.time()
+    time_since_last_reset = current_time - alpha_vantage_last_reset_time
 
-    # Rate limiting to 5 API calls per minute
-    time.sleep(12)  # Sleep for 12 seconds to ensure we don't exceed 5 API calls per minute
+    if time_since_last_reset < ALPHA_VANTAGE_TIME_INTERVAL:
+        wait_time = ALPHA_VANTAGE_TIME_INTERVAL - time_since_last_reset
+        logger.info(f"Waiting {wait_time} seconds before making the next Alpha Vantage request...")
+        time.sleep(wait_time)
 
-    # Make API request to Alpha Vantage for Intraday Time Series Data
-    response = requests.get(alpha_vantage_url_intraday, params=params)
+    params = {
+        'function': function,
+        'symbol': symbol,
+        'outputsize': outputsize,
+        'apikey': api_key
+    }
 
-    if response.status_code == 200:
-        data = response.json().get("Time Series (1min)")
-        df = pd.DataFrame.from_dict(data, orient='index')
-        df.index.name = 'timestamp'
-        df.reset_index(inplace=True)
-        df['symbol'] = symbol
-        df['type'] = 'intraday'
-        df.to_json('stock_prices.json', orient='records')
+    try:
+        response = requests.get(base_url, params=params)
+        response.raise_for_status()  # Raise HTTPError for bad responses
 
-        # Insert data into MongoDB
-        intraday_collection.insert_many(df.to_dict('records'))
+        data = response.json()
+
+        if 'Time Series (Daily)' in data:
+            # Extract daily data
+            daily_data = data['Time Series (Daily)']
+            df = pd.DataFrame(daily_data).T
+            df.index = pd.to_datetime(df.index)
+            df.columns = ['open', 'high', 'low', 'close', 'volume']
+
+            # Increment the rate limit counter
+            alpha_vantage_calls += 1
+
+            # Reset the rate limit counter
+            if alpha_vantage_calls >= ALPHA_VANTAGE_RATE_LIMIT:
+                alpha_vantage_calls = 0
+                alpha_vantage_last_reset_time = time.time()
+
+            # Initialize MongoDB client
+            client = MongoClient(MONGO_URI)
+
+            # Save the fetched data in MongoDB
+            db = client[MONGO_DB]
+            collection = db[MONGO_COLLECTION]
+            collection.insert_one({"symbol": symbol, "data": df.to_dict()})
+            logger.info(f"Data for {symbol} saved to MongoDB.")
+
+            # Send the fetched data to Kafka
+            send_to_kafka(topic=KAFKA_TOPIC, key=symbol, data=df)
+
+            return df
+        else:
+            logger.error(f"Failed to fetch daily data for {symbol}. Response: {data}")
+            return None
+    except requests.RequestException as e:
+        logger.error(f"Failed to make Alpha Vantage request: {e}")
+        return None
+
+def send_to_kafka(topic, key, data):
+    try:
+        # Convert DataFrame to JSON string before sending to Kafka
+        json_data = data.to_json()
+
+        # Send data to Kafka with a dynamic key (e.g., based on the symbol)
+        producer.produce(topic, key=key, value=json_data)
+        producer.flush()  # Ensure any outstanding messages are delivered
+        logger.info(f"Data sent to Kafka topic '{topic}' successfully for symbol '{key}'.")
+    except Exception as e:
+        logger.error(f"Failed to send data to Kafka: {e}")
+
+# Example usage:
+symbols = ["AAPL", "GOOGL"]
+for symbol in symbols:
+    get_daily_data(symbol, outputsize='full')

@@ -22,8 +22,27 @@ alpha_vantage_last_reset_time = time.time()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+def get_latest_date_from_mongodb(symbol):
+    try:
+        # Connect to MongoDB
+        client = MongoClient(MONGODB_URI)
+        db = client[DB_NAME]
+        collection = db[COLLECTION_NAME]
+
+        # Find the latest date for the symbol
+        latest_date_cursor = collection.find({'symbol': symbol}, {'_id': 0, 'data': 1}).sort('data', -1).limit(1)
+        latest_date = list(latest_date_cursor)[0]['data'].keys()[0] if latest_date_cursor.count() > 0 else None
+
+        return latest_date
+    except Exception as e:
+        logger.error(f"Failed to get latest date from MongoDB: {e}")
+        return None
+    finally:
+        # Close the MongoDB connection
+        client.close()
+
 def get_daily_data(symbol, outputsize='compact'):
-    api_key = 'Q1UJ6MLZ7CHJJ4E1'
+    api_key = '1DMX8XAI11JYVQC5'
     base_url = 'https://www.alphavantage.co/query'
     function = 'TIME_SERIES_DAILY'
 
@@ -62,6 +81,8 @@ def make_alpha_vantage_api_call_and_store(ts, symbol, outputsize='compact'):
     # Make the API call
     for attempt in range(1, 4):  # 3 attempts
         try:
+            latest_date = get_latest_date_from_mongodb(symbol)
+
             data = get_daily_data(symbol, outputsize=outputsize)
             alpha_vantage_calls += 1
 
@@ -70,10 +91,13 @@ def make_alpha_vantage_api_call_and_store(ts, symbol, outputsize='compact'):
                 alpha_vantage_calls = 1
                 alpha_vantage_last_reset_time = time.time()
 
-            # Store data in MongoDB
-            store_data_in_mongodb(data, symbol)
-
-            return data
+            # Store data in MongoDB if there is new data for the latest date
+            if latest_date is None or (latest_date is not None and data.index.max() > latest_date):
+                store_data_in_mongodb(data, symbol)
+                return data
+            else:
+                logger.info(f"No new data fetched for {symbol}.")
+                return None
         except Exception as e:
             logger.error(f"API call failed on attempt {attempt}: {e}")
             if attempt < 3:
@@ -102,7 +126,7 @@ def store_data_in_mongodb(data, symbol):
             })
             logger.info(f"Data for {symbol} successfully stored in MongoDB.")
         else:
-            logger.error(f"Invalid data format. Failed to store data in MongoDB for {symbol}.")
+            logger.error(f"Invalid data format or no data for {symbol}. Failed to store data in MongoDB.")
     except Exception as e:
         logger.error(f"Failed to store data in MongoDB: {e}")
     finally:
@@ -110,14 +134,14 @@ def store_data_in_mongodb(data, symbol):
         client.close()
 
 # Example usage with multiple symbols:
-symbols = ["AAPL", "GOOGL"]
-ts = TimeSeries(key='Q1UJ6MLZ7CHJJ4E1', output_format='pandas')
+symbols = ["AAPL", "GOOGL"]  # Add or remove symbols as needed
+ts = TimeSeries(key='1DMX8XAI11JYVQC5', output_format='pandas')
 
 for symbol in symbols:
     # Fetch daily data with rate limiting and store in MongoDB
-    data = make_alpha_vantage_api_call_and_store(ts, symbol, outputsize='full')
+    data = make_alpha_vantage_api_call_and_store(ts, symbol, outputsize='compact')
     if data is not None:
         print(f"Data for {symbol}:")
         print(data)
     else:
-        print(f"Failed to fetch and store daily data for {symbol}.")
+        print(f"No new data fetched for {symbol}.")
