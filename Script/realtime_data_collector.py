@@ -68,6 +68,9 @@ def get_daily_data(symbol, outputsize='compact'):
             df.index = pd.to_datetime(df.index)
             df.columns = ['open', 'high', 'low', 'close', 'volume']
 
+            # Convert Timestamps to strings
+            df.index = df.index.astype(str)
+
             # Increment the rate limit counter
             alpha_vantage_calls += 1
 

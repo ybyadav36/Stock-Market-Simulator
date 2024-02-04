@@ -1,6 +1,7 @@
 import time
 import logging
 import requests
+import pymongo
 from alpha_vantage.timeseries import TimeSeries
 from pymongo import MongoClient
 import pandas as pd
@@ -10,8 +11,8 @@ ALPHA_VANTAGE_RATE_LIMIT = 5
 ALPHA_VANTAGE_TIME_INTERVAL = 60  # seconds
 
 # MongoDB connection
-MONGODB_URI = 'mongodb://localhost:27017/'  # Update with your MongoDB connection URI
-DB_NAME = 'my-mongodb-container'  # Update with your MongoDB database name
+MONGODB_URI = 'mongodb://localhost:27017/'  
+DB_NAME = 'my-mongodb-container'  
 COLLECTION_NAME = 'stock_prices'
 
 # Initialize variables for rate limiting
@@ -31,7 +32,11 @@ def get_latest_date_from_mongodb(symbol):
 
         # Find the latest date for the symbol
         latest_date_cursor = collection.find({'symbol': symbol}, {'_id': 0, 'data': 1}).sort('data', -1).limit(1)
-        latest_date = list(latest_date_cursor)[0]['data'].keys()[0] if latest_date_cursor.count() > 0 else None
+
+        # Use count_documents if available, fallback to count for older versions
+        latest_date_count = latest_date_cursor.count_documents({}) if hasattr(latest_date_cursor, 'count_documents') else latest_date_cursor.count()
+
+        latest_date = list(latest_date_cursor)[0]['data'].keys()[0] if latest_date_count > 0 else None
 
         return latest_date
     except Exception as e:
@@ -42,7 +47,7 @@ def get_latest_date_from_mongodb(symbol):
         client.close()
 
 def get_daily_data(symbol, outputsize='compact'):
-    api_key = '1DMX8XAI11JYVQC5'
+    api_key = 'Q1UJ6MLZ7CHJJ4E1'
     base_url = 'https://www.alphavantage.co/query'
     function = 'TIME_SERIES_DAILY'
 
@@ -119,14 +124,25 @@ def store_data_in_mongodb(data, symbol):
             # Convert timestamps to string before storing in MongoDB
             data_str_timestamp = {str(key): value for key, value in data.to_dict(orient='index').items()}
 
-            # Unpack the data and insert into MongoDB
-            collection.insert_one({
-                'symbol': symbol,
-                'data': data_str_timestamp
-            })
-            logger.info(f"Data for {symbol} successfully stored in MongoDB.")
+            # Check if the document with the given symbol already exists
+            existing_document = collection.find_one({'symbol': symbol})
+            
+            if existing_document:
+                # Document already exists, update it or handle as needed
+                # For example, you might want to update only specific fields
+                # collection.update_one({'symbol': symbol}, {'$set': {'data': data_str_timestamp}})
+                logger.info(f"Data for {symbol} already exists. Updating existing document.")
+            else:
+                # Document does not exist, insert the new document
+                collection.insert_one({
+                    'symbol': symbol,
+                    'data': data_str_timestamp
+                })
+                logger.info(f"Data for {symbol} successfully stored in MongoDB.")
         else:
             logger.error(f"Invalid data format or no data for {symbol}. Failed to store data in MongoDB.")
+    except pymongo.errors.DuplicateKeyError as e:
+        logger.warning(f"Duplicate key error: {e}")
     except Exception as e:
         logger.error(f"Failed to store data in MongoDB: {e}")
     finally:
