@@ -1,68 +1,117 @@
+import time
+import logging
 import requests
-import psycopg2
-from datetime import datetime
+from confluent_kafka import Producer, KafkaError
+import pandas as pd
+from pymongo import MongoClient
 
-# Alpha Vantage API Key
-alpha_vantage_api_key = "Q1UJ6MLZ7CHJJ4E1"
+# Alpha Vantage rate limit: 5 calls per minute
+ALPHA_VANTAGE_RATE_LIMIT = 5
+ALPHA_VANTAGE_TIME_INTERVAL = 60  # seconds
 
-# PostgreSQL Connection
-conn = psycopg2.connect(
-    database="Simulator",
-    user="ybyadav36",
-    password="20April98@#$",
-    host="localhost",
-    port="5432"
-)
-cur = conn.cursor()
+# Kafka configuration
+KAFKA_BROKER = 'localhost:9092'  
+KAFKA_TOPIC = 'stock-data'  
 
-# Alpha Vantage API Endpoint for Historical Stock Quotes
-alpha_vantage_url = "https://www.alphavantage.co/query"
-symbol = "AAPL"
-function = "TIME_SERIES_DAILY"
-params = {
-    "function": function,
-    "symbol": symbol,
-    "apikey": alpha_vantage_api_key,
+# MongoDB connection
+MONGO_URI = "mongodb://localhost:27017"
+MONGO_DB = "simulator"
+MONGO_COLLECTION = "historical_data"
+
+# Initialize variables for rate limiting
+alpha_vantage_calls = 0
+alpha_vantage_last_reset_time = time.time()
+
+# Initialize Kafka Producer
+kafka_producer_config = {
+    'bootstrap.servers': KAFKA_BROKER,
 }
 
-# Create historical_stock_data table if not exists
-cur.execute('''
-    CREATE TABLE IF NOT EXISTS historical_stock_data (
-        id SERIAL PRIMARY KEY,
-        symbol VARCHAR(10),
-        date DATE,
-        open FLOAT,
-        high FLOAT,
-        low FLOAT,
-        close FLOAT,
-        volume INT
-    )
-''')
+producer = Producer(kafka_producer_config)
 
-# Make API request to Alpha Vantage
-response = requests.get(alpha_vantage_url, params=params)
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-if response.status_code == 200:
-    data = response.json().get("Time Series (Daily)", {})
-    
-    # Insert data into PostgreSQL
-    records_inserted = 0
-    for date, values in data.items():
-        date_obj = datetime.strptime(date, "%Y-%m-%d")
-        cur.execute(
-            "INSERT INTO historical_stock_data (symbol, date, open, high, low, close, volume) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-            (symbol, date_obj, float(values["1. open"]), float(values["2. high"]), float(values["3. low"]), float(values["4. close"]), int(values["5. volume"]))
-        )
-        records_inserted += 1
+def get_daily_data(symbol, outputsize='compact'):
+    global alpha_vantage_calls, alpha_vantage_last_reset_time
 
-    # Commit changes
-    conn.commit()
-    
-    # Print the total number of records inserted
-    print(f"Total records inserted: {records_inserted}")
-else:
-    print(f"Error fetching data from Alpha Vantage. Status code: {response.status_code}")
+    api_key = '1DMX8XAI11JYVQC5'
+    base_url = 'https://www.alphavantage.co/query'
+    function = 'TIME_SERIES_DAILY'
 
-# Close database connection
-cur.close()
-conn.close()
+    current_time = time.time()
+    time_since_last_reset = current_time - alpha_vantage_last_reset_time
+
+    if time_since_last_reset < ALPHA_VANTAGE_TIME_INTERVAL:
+        wait_time = ALPHA_VANTAGE_TIME_INTERVAL - time_since_last_reset
+        logger.info(f"Waiting {wait_time} seconds before making the next Alpha Vantage request...")
+        time.sleep(wait_time)
+
+    params = {
+        'function': function,
+        'symbol': symbol,
+        'outputsize': outputsize,
+        'apikey': api_key
+    }
+
+    try:
+        response = requests.get(base_url, params=params)
+        response.raise_for_status()  # Raise HTTPError for bad responses
+
+        data = response.json()
+
+        if 'Time Series (Daily)' in data:
+            # Extract daily data
+            daily_data = data['Time Series (Daily)']
+            df = pd.DataFrame(daily_data).T
+            df.index = pd.to_datetime(df.index)
+            df.columns = ['open', 'high', 'low', 'close', 'volume']
+
+            # Convert Timestamps to strings
+            df.index = df.index.astype(str)
+
+            # Increment the rate limit counter
+            alpha_vantage_calls += 1
+
+            # Reset the rate limit counter
+            if alpha_vantage_calls >= ALPHA_VANTAGE_RATE_LIMIT:
+                alpha_vantage_calls = 0
+                alpha_vantage_last_reset_time = time.time()
+
+            # Initialize MongoDB client
+            client = MongoClient(MONGO_URI)
+
+            # Save the fetched data in MongoDB
+            db = client[MONGO_DB]
+            collection = db[MONGO_COLLECTION]
+            collection.insert_one({"symbol": symbol, "data": df.to_dict()})
+            logger.info(f"Data for {symbol} saved to MongoDB.")
+
+            # Send the fetched data to Kafka
+            send_to_kafka(topic=KAFKA_TOPIC, key=symbol, data=df)
+
+            return df
+        else:
+            logger.error(f"Failed to fetch daily data for {symbol}. Response: {data}")
+            return None
+    except requests.RequestException as e:
+        logger.error(f"Failed to make Alpha Vantage request: {e}")
+        return None
+
+def send_to_kafka(topic, key, data):
+    try:
+        # Convert DataFrame to JSON string before sending to Kafka
+        json_data = data.to_json()
+
+        # Send data to Kafka with a dynamic key (e.g., based on the symbol)
+        producer.produce(topic, key=key, value=json_data)
+        producer.flush()  # Ensure any outstanding messages are delivered
+        logger.info(f"Data sent to Kafka topic '{topic}' successfully for symbol '{key}'.")
+    except Exception as e:
+        logger.error(f"Failed to send data to Kafka: {e}")
+
+# Example usage:
+symbols = ["AAPL", "GOOG", "META", "AMZN"]
+for symbol in symbols:
+    get_daily_data(symbol, outputsize='full')

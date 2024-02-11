@@ -11,3 +11,42 @@ Dockerfile
 
 # Local data files (if any)
 data/
+
+
+# Compiled Python files
+*.pyc
+*.pyo
+*.pyd
+
+# Build directory for Python extensions
+build/
+
+# Compiled Python extension modules
+*.so
+
+# Logs and temporary files
+*.log
+*.tmp
+
+# System and hidden files
+.DS_Store
+Thumbs.db
+
+# IDE/editor-specific files
+.vscode/
+.idea/
+
+# Local environment files
+.env
+
+# Dependency management files
+requirements.txt
+
+# SQLite database file
+db.sqlite3
+
+# Distribution directory (e.g., for built packages)
+dist/
+
+# Static assets (if managed outside of version control)
+static/

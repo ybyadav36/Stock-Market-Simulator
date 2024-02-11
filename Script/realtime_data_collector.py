@@ -1,117 +1,82 @@
+from datetime import datetime, timedelta
+from kafka import KafkaProducer
+import yfinance as yf
+import json
 import time
-import logging
-import requests
-from confluent_kafka import Producer, KafkaError
-import pandas as pd
-from pymongo import MongoClient
-
-# Alpha Vantage rate limit: 5 calls per minute
-ALPHA_VANTAGE_RATE_LIMIT = 5
-ALPHA_VANTAGE_TIME_INTERVAL = 60  # seconds
+from pytz import timezone
 
 # Kafka configuration
-KAFKA_BROKER = 'localhost:9092'  # Update with your Kafka broker details
-KAFKA_TOPIC = 'stock-data'  # Update with your Kafka topic name
+kafka_producer = KafkaProducer(
+    bootstrap_servers="localhost:9092",
+    value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+)
+kafka_topic = "stock-data"
 
-# MongoDB connection
-MONGO_URI = "mongodb://localhost:27017"
-MONGO_DB = "my-mongodb-container"
-MONGO_COLLECTION = "daily_stock_data"
+# Symbols to track
+symbols = ["AAPL", "GOOG", "META", "AMZN"]
 
-# Initialize variables for rate limiting
-alpha_vantage_calls = 0
-alpha_vantage_last_reset_time = time.time()
+# Set IST timezone
+ist_timezone = timezone('Asia/Kolkata')
 
-# Initialize Kafka Producer
-kafka_producer_config = {
-    'bootstrap.servers': KAFKA_BROKER,
-}
-
-producer = Producer(kafka_producer_config)
-
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-def get_daily_data(symbol, outputsize='compact'):
-    global alpha_vantage_calls, alpha_vantage_last_reset_time
-
-    api_key = '1DMX8XAI11JYVQC5'
-    base_url = 'https://www.alphavantage.co/query'
-    function = 'TIME_SERIES_DAILY'
-
-    current_time = time.time()
-    time_since_last_reset = current_time - alpha_vantage_last_reset_time
-
-    if time_since_last_reset < ALPHA_VANTAGE_TIME_INTERVAL:
-        wait_time = ALPHA_VANTAGE_TIME_INTERVAL - time_since_last_reset
-        logger.info(f"Waiting {wait_time} seconds before making the next Alpha Vantage request...")
-        time.sleep(wait_time)
-
-    params = {
-        'function': function,
-        'symbol': symbol,
-        'outputsize': outputsize,
-        'apikey': api_key
-    }
-
+while True:
     try:
-        response = requests.get(base_url, params=params)
-        response.raise_for_status()  # Raise HTTPError for bad responses
+        # Get current start time in IST for the 30-second interval
+        start_time_ist = datetime.now(ist_timezone)
 
-        data = response.json()
+        # Check if within desired market hours (7:00 PM to 2:30 AM IST)
+        current_time_ist = start_time_ist.strftime("%H:%M:%S")
+        if current_time_ist >= "19:00:00" and current_time_ist <= "02:30:00":
+            # Run loop for the 30-second interval in IST, fetching and sending data
+            for symbol in symbols:
+                try:
+                    # Download intraday data for the current minute in IST
+                    current_time_ist = datetime.now(ist_timezone).strftime("%H:%M:%S")
+                    today = datetime.now(ist_timezone).strftime("%Y-%m-%d")
 
-        if 'Time Series (Daily)' in data:
-            # Extract daily data
-            daily_data = data['Time Series (Daily)']
-            df = pd.DataFrame(daily_data).T
-            df.index = pd.to_datetime(df.index)
-            df.columns = ['open', 'high', 'low', 'close', 'volume']
+                    # Adjust for US market time (9:30 AM EST onwards)
+                    # Calculate time difference between IST and EST
+                    est_timezone = timezone('America/New_York')
+                    time_diff = est_timezone.localize(datetime.now()) - ist_timezone.localize(datetime.now())
+                    est_current_time = (current_time_ist - time_diff).strftime("%H:%M:%S")
 
-            # Convert Timestamps to strings
-            df.index = df.index.astype(str)
+                    data = yf.download(
+                        symbol,
+                        start=f"{today} {est_current_time}",
+                        end=f"{today} {est_current_time}",
+                        interval="1m",
+                    )
 
-            # Increment the rate limit counter
-            alpha_vantage_calls += 1
+                    # Check if data is empty
+                    if data.empty:
+                        print(f"No data available for {symbol} at {est_current_time} EST, skipping...")
+                        continue
 
-            # Reset the rate limit counter
-            if alpha_vantage_calls >= ALPHA_VANTAGE_RATE_LIMIT:
-                alpha_vantage_calls = 0
-                alpha_vantage_last_reset_time = time.time()
+                    # Create message dictionary
+                    message = {
+                        "symbol": symbol,
+                        "timestamp": data.index[0].strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "data": data.to_dict("records"),
+                    }
 
-            # Initialize MongoDB client
-            client = MongoClient(MONGO_URI)
+                    # Send message to Kafka
+                    kafka_producer.send(kafka_topic, json.dumps(message))
+                    print(f"Sent data for {symbol} at {est_current_time} EST to Kafka")
 
-            # Save the fetched data in MongoDB
-            db = client[MONGO_DB]
-            collection = db[MONGO_COLLECTION]
-            collection.insert_one({"symbol": symbol, "data": df.to_dict()})
-            logger.info(f"Data for {symbol} saved to MongoDB.")
+                except Exception as e:
+                    if "out of bounds" in str(e):
+                        print(f"Error fetching data for {symbol}: empty data, skipping...")
+                    else:
+                        print(f"Error fetching data for {symbol}: {e}")
 
-            # Send the fetched data to Kafka
-            send_to_kafka(topic=KAFKA_TOPIC, key=symbol, data=df)
+                # Sleep for 30 seconds before fetching the next data
+                time.sleep(30)
 
-            return df
         else:
-            logger.error(f"Failed to fetch daily data for {symbol}. Response: {data}")
-            return None
-    except requests.RequestException as e:
-        logger.error(f"Failed to make Alpha Vantage request: {e}")
-        return None
+            print("Market is closed in IST, skipping data download...")
 
-def send_to_kafka(topic, key, data):
-    try:
-        # Convert DataFrame to JSON string before sending to Kafka
-        json_data = data.to_json()
-
-        # Send data to Kafka with a dynamic key (e.g., based on the symbol)
-        producer.produce(topic, key=key, value=json_data)
-        producer.flush()  # Ensure any outstanding messages are delivered
-        logger.info(f"Data sent to Kafka topic '{topic}' successfully for symbol '{key}'.")
     except Exception as e:
-        logger.error(f"Failed to send data to Kafka: {e}")
+        print(f"Unexpected error: {e}")
+        time.sleep(60 * 5)  # Wait 5 minutes before retrying
 
-# Example usage:
-symbols = ["AAPL", "GOOGL"]
-for symbol in symbols:
-    get_daily_data(symbol, outputsize='full')
+# Flush and close producer (if you intend to stop the script manually)
+kafka_producer.flush()
