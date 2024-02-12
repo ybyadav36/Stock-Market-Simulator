@@ -1,163 +1,139 @@
 import time
 import logging
 import requests
-import pymongo
-from alpha_vantage.timeseries import TimeSeries
-from pymongo import MongoClient
+from confluent_kafka import Producer
 import pandas as pd
+from pymongo import MongoClient
+import re
 
 # Alpha Vantage rate limit: 5 calls per minute
 ALPHA_VANTAGE_RATE_LIMIT = 5
 ALPHA_VANTAGE_TIME_INTERVAL = 60  # seconds
 
+# Kafka configuration
+KAFKA_BROKER = 'localhost:9092'
+KAFKA_TOPIC = 'stock-data'
+
 # MongoDB connection
-MONGODB_URI = 'mongodb://localhost:27017/'  
-DB_NAME = 'my-mongodb-container'  
-COLLECTION_NAME = 'stock_prices'
+MONGO_URI = "mongodb://localhost:27017"
+MONGO_DB = "simulator"
+MONGO_COLLECTION = "daily_data"
 
 # Initialize variables for rate limiting
 alpha_vantage_calls = 0
 alpha_vantage_last_reset_time = time.time()
 
+# Initialize Kafka Producer
+kafka_producer_config = {
+    'bootstrap.servers': KAFKA_BROKER,
+}
+producer = Producer(kafka_producer_config)
+
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def get_latest_date_from_mongodb(symbol):
-    try:
-        # Connect to MongoDB
-        client = MongoClient(MONGODB_URI)
-        db = client[DB_NAME]
-        collection = db[COLLECTION_NAME]
 
-        # Find the latest date for the symbol
-        latest_date_cursor = collection.find({'symbol': symbol}, {'_id': 0, 'data': 1}).sort('data', -1).limit(1)
+def validate_symbol(symbol):
+    # Implement validation logic here
+    # Example: Ensure symbol consists only of letters and is not empty
+    if not re.match("^[a-zA-Z]+$", symbol):
+        logger.error("Invalid symbol format.")
+        return False
+    return True
 
-        # Use count_documents if available, fallback to count for older versions
-        latest_date_count = latest_date_cursor.count_documents({}) if hasattr(latest_date_cursor, 'count_documents') else latest_date_cursor.count()
 
-        latest_date = list(latest_date_cursor)[0]['data'].keys()[0] if latest_date_count > 0 else None
+def sanitize_input(input_data):
+    # Implement sanitization logic here
+    # Example: Remove any potentially harmful characters
+    sanitized_data = re.sub(r'[^\w\s]', '', input_data)
+    return sanitized_data
 
-        return latest_date
-    except Exception as e:
-        logger.error(f"Failed to get latest date from MongoDB: {e}")
-        return None
-    finally:
-        # Close the MongoDB connection
-        client.close()
 
-def get_daily_data(symbol, outputsize='compact'):
-    api_key = 'Q1UJ6MLZ7CHJJ4E1'
+def get_daily_intraday_data(symbol):
+    global alpha_vantage_calls, alpha_vantage_last_reset_time
+
+    api_key = '1DMX8XAI11JYVQC5'  
     base_url = 'https://www.alphavantage.co/query'
-    function = 'TIME_SERIES_DAILY'
+    function = 'TIME_SERIES_INTRADAY'  
+
+    current_time = time.time()
+    time_since_last_reset = current_time - alpha_vantage_last_reset_time
+
+    if time_since_last_reset < ALPHA_VANTAGE_TIME_INTERVAL:
+        wait_time = ALPHA_VANTAGE_TIME_INTERVAL - time_since_last_reset
+        logger.info(f"Waiting {wait_time} seconds before making the next Alpha Vantage request...")
+        time.sleep(wait_time)
 
     params = {
         'function': function,
         'symbol': symbol,
-        'outputsize': outputsize,
+        'interval': '1min',  # Adjust interval for intraday data
+        'outputsize': 'compact',  # Retrieve only the latest data
         'apikey': api_key
     }
 
-    response = requests.get(base_url, params=params)
-    data = response.json()
+    try:
+        response = requests.get(base_url, params=params)
+        response.raise_for_status()  # Raise HTTPError for bad responses
 
-    if 'Time Series (Daily)' in data:
-        # Extract daily data
-        daily_data = data['Time Series (Daily)']
-        df = pd.DataFrame(daily_data).T
-        df.index = pd.to_datetime(df.index)
-        df.columns = ['open', 'high', 'low', 'close', 'volume']
-        return df
-    else:
-        print(f"Failed to fetch daily data for {symbol}.")
-        return None
+        data = response.json()
 
-def make_alpha_vantage_api_call_and_store(ts, symbol, outputsize='compact'):
-    global alpha_vantage_calls
-    global alpha_vantage_last_reset_time
+        if 'Time Series (1min)' in data:
+            # Extract intraday data
+            intraday_data = data['Time Series (1min)']
+            intraday_df = pd.DataFrame(intraday_data).T
+            intraday_df.index = pd.to_datetime(intraday_df.index)
+            intraday_df.columns = ['open', 'high', 'low', 'close', 'volume']
 
-    # Check if we've reached the rate limit
-    elapsed_time = time.time() - alpha_vantage_last_reset_time
-    if alpha_vantage_calls >= ALPHA_VANTAGE_RATE_LIMIT and elapsed_time < ALPHA_VANTAGE_TIME_INTERVAL:
-        wait_time = ALPHA_VANTAGE_TIME_INTERVAL - elapsed_time
-        logger.warning(f"Rate limit reached. Waiting for {wait_time:.2f} seconds before making the next API call.")
-        time.sleep(wait_time)
+            # Convert Timestamps to strings
+            intraday_df.index = intraday_df.index.astype(str)
 
-    # Make the API call
-    for attempt in range(1, 4):  # 3 attempts
-        try:
-            latest_date = get_latest_date_from_mongodb(symbol)
-
-            data = get_daily_data(symbol, outputsize=outputsize)
+            # Increment the rate limit counter
             alpha_vantage_calls += 1
 
-            # Check if a new minute has started
-            if elapsed_time >= ALPHA_VANTAGE_TIME_INTERVAL:
-                alpha_vantage_calls = 1
+            # Reset the rate limit counter
+            if alpha_vantage_calls >= ALPHA_VANTAGE_RATE_LIMIT:
+                alpha_vantage_calls = 0
                 alpha_vantage_last_reset_time = time.time()
 
-            # Store data in MongoDB if there is new data for the latest date
-            if latest_date is None or (latest_date is not None and data.index.max() > latest_date):
-                store_data_in_mongodb(data, symbol)
-                return data
-            else:
-                logger.info(f"No new data fetched for {symbol}.")
-                return None
-        except Exception as e:
-            logger.error(f"API call failed on attempt {attempt}: {e}")
-            if attempt < 3:
-                logger.info(f"Retrying in 5 seconds...")
-                time.sleep(5)
-            else:
-                logger.warning("Maximum retries reached. API call failed.")
-                return None
+            # Initialize MongoDB client
+            client = MongoClient(MONGO_URI)
 
-def store_data_in_mongodb(data, symbol):
-    try:
-        # Connect to MongoDB
-        client = MongoClient(MONGODB_URI)
-        db = client[DB_NAME]
-        collection = db[COLLECTION_NAME]
+            # Save the fetched data in MongoDB
+            db = client[MONGO_DB]
+            collection = db[MONGO_COLLECTION]
+            collection.insert_one({"symbol": symbol, "data": intraday_df.to_dict()})
+            logger.info(f"Intraday data for {symbol} saved to MongoDB.")
 
-        # Check if the data is in the correct format
-        if data is not None:
-            # Convert timestamps to string before storing in MongoDB
-            data_str_timestamp = {str(key): value for key, value in data.to_dict(orient='index').items()}
+            # Send the fetched data to Kafka
+            send_to_kafka(topic=KAFKA_TOPIC, key=symbol, data=intraday_df)
 
-            # Check if the document with the given symbol already exists
-            existing_document = collection.find_one({'symbol': symbol})
-            
-            if existing_document:
-                # Document already exists, update it or handle as needed
-                # For example, you might want to update only specific fields
-                # collection.update_one({'symbol': symbol}, {'$set': {'data': data_str_timestamp}})
-                logger.info(f"Data for {symbol} already exists. Updating existing document.")
-            else:
-                # Document does not exist, insert the new document
-                collection.insert_one({
-                    'symbol': symbol,
-                    'data': data_str_timestamp
-                })
-                logger.info(f"Data for {symbol} successfully stored in MongoDB.")
+            return intraday_df
         else:
-            logger.error(f"Invalid data format or no data for {symbol}. Failed to store data in MongoDB.")
-    except pymongo.errors.DuplicateKeyError as e:
-        logger.warning(f"Duplicate key error: {e}")
+            logger.error(f"Failed to fetch intraday data for {symbol}. Response: {data}")
+            return None
+    except requests.RequestException as e:
+        logger.error(f"Failed to make Alpha Vantage request: {e}")
+        return None
+
+
+def send_to_kafka(topic, key, data):
+    try:
+        # Convert DataFrame to JSON before sending to Kafka
+        json_data = data.to_json()
+
+        # Send data to Kafka with a dynamic key (e.g., symbol)
+        producer.produce(topic, key=key, value=json_data)
+        producer.flush()  # Ensure any outstanding messages are delivered
+        logger.info(f"Data sent to Kafka topic '{topic}' successfully for symbol '{key}'.")
     except Exception as e:
-        logger.error(f"Failed to store data in MongoDB: {e}")
-    finally:
-        # Close the MongoDB connection
-        client.close()
+        logger.error(f"Failed to send data to Kafka: {e}")
 
-# Example usage with multiple symbols:
-symbols = ["AAPL", "GOOGL"]  # Add or remove symbols as needed
-ts = TimeSeries(key='1DMX8XAI11JYVQC5', output_format='pandas')
 
+# Example usage:
+symbols = ["AAPL", "GOOG", "META", "AMZN"]
 for symbol in symbols:
-    # Fetch daily data with rate limiting and store in MongoDB
-    data = make_alpha_vantage_api_call_and_store(ts, symbol, outputsize='compact')
-    if data is not None:
-        print(f"Data for {symbol}:")
-        print(data)
-    else:
-        print(f"No new data fetched for {symbol}.")
+    if validate_symbol(symbol):
+        sanitized_symbol = sanitize_input(symbol)
+        get_daily_intraday_data(sanitized_symbol)

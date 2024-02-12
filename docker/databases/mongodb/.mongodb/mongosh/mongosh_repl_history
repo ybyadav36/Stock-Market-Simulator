@@ -1,4 +1,6 @@
 exit
+db.createCollection("daily_data")
+exit
 db.createCollection("historical_data")
 use simulator
 db.createCollection("historical_data")
