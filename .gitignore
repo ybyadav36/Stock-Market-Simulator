@@ -50,3 +50,7 @@ dist/
 
 # Static assets (if managed outside of version control)
 static/
+
+# Ignore configuration files with sensitive information
+config/*.yaml
+config/*.json

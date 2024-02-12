@@ -1,0 +1,22 @@
+exit
+db.createCollection("daily_data")
+exit
+db.createCollection("historical_data")
+use simulator
+db.createCollection("historical_data")
+creat collection historical_data
+create collection historical_data
+show collections
+use my-mongodb-container
+exit
+show collections
+use my-mongodb-container
+show collections
+exit
+exite
+docker exec -it docker-mongo-1 mongo admin -u admin -p
+use admin
+exit
+db.createUser({ user: "admin", pwd: "your_admin_password", roles: [{ role: "root", db: "admin" }] })
+use adminndb: "admin" }] })
+use adminninn
