@@ -1,9 +1,9 @@
 from datetime import datetime, timedelta
+from pytz import timezone
+import time
+import json
 from kafka import KafkaProducer
 import yfinance as yf
-import json
-import time
-from pytz import timezone
 
 # Kafka configuration
 kafka_producer = KafkaProducer(
@@ -15,64 +15,49 @@ kafka_topic = "stock-data"
 # Symbols to track
 symbols = ["AAPL", "GOOG", "META", "AMZN"]
 
-# Set IST timezone
-ist_timezone = timezone('Asia/Kolkata')
+# Set US Eastern Timezone
+us_eastern_timezone = timezone('US/Eastern')
 
 while True:
     try:
-        # Get current start time in IST for the 30-second interval
-        start_time_ist = datetime.now(ist_timezone)
+        # Get current time in US Eastern Time
+        current_time_us_eastern = datetime.now(us_eastern_timezone)
 
-        # Check if within desired market hours (7:00 PM to 2:30 AM IST)
-        current_time_ist = start_time_ist.strftime("%H:%M:%S")
-        if current_time_ist >= "19:00:00" and current_time_ist <= "02:30:00":
-            # Run loop for the 30-second interval in IST, fetching and sending data
+        # Check if within desired market hours (9:30 AM to 4:00 PM US Eastern Time)
+        if current_time_us_eastern.hour >= 9 and current_time_us_eastern.hour < 16:
             for symbol in symbols:
                 try:
-                    # Download intraday data for the current minute in IST
-                    current_time_ist = datetime.now(ist_timezone).strftime("%H:%M:%S")
-                    today = datetime.now(ist_timezone).strftime("%Y-%m-%d")
-
-                    # Adjust for US market time (9:30 AM EST onwards)
-                    # Calculate time difference between IST and EST
-                    est_timezone = timezone('America/New_York')
-                    time_diff = est_timezone.localize(datetime.now()) - ist_timezone.localize(datetime.now())
-                    est_current_time = (current_time_ist - time_diff).strftime("%H:%M:%S")
-
+                    # Fetch live data for the current minute
                     data = yf.download(
                         symbol,
-                        start=f"{today} {est_current_time}",
-                        end=f"{today} {est_current_time}",
-                        interval="1m",
+                        period="1d",    # Fetch live data for the current day
+                        interval="1m",  # 1-minute intervals
                     )
 
                     # Check if data is empty
                     if data.empty:
-                        print(f"No data available for {symbol} at {est_current_time} EST, skipping...")
+                        print(f"No data available for {symbol} at {current_time_us_eastern}, skipping...")
                         continue
 
                     # Create message dictionary
                     message = {
                         "symbol": symbol,
-                        "timestamp": data.index[0].strftime("%Y-%m-%dT%H:%M:%SZ"),
-                        "data": data.to_dict("records"),
+                        "timestamp": datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "data": data.iloc[-1:].to_dict("records"),  # Fetch only the latest data point
                     }
 
                     # Send message to Kafka
                     kafka_producer.send(kafka_topic, json.dumps(message))
-                    print(f"Sent data for {symbol} at {est_current_time} EST to Kafka")
+                    print(f"Sent data for {symbol} at {current_time_us_eastern} to Kafka")
 
                 except Exception as e:
-                    if "out of bounds" in str(e):
-                        print(f"Error fetching data for {symbol}: empty data, skipping...")
-                    else:
-                        print(f"Error fetching data for {symbol}: {e}")
-
-                # Sleep for 30 seconds before fetching the next data
-                time.sleep(30)
+                    print(f"Error fetching data for {symbol}: {e}")
 
         else:
-            print("Market is closed in IST, skipping data download...")
+            print("US market is closed, skipping data download...")
+
+        # Sleep for 30 seconds before fetching the next data
+        time.sleep(30)
 
     except Exception as e:
         print(f"Unexpected error: {e}")
