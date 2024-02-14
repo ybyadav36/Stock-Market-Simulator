@@ -52,5 +52,5 @@ dist/
 static/
 
 # Ignore configuration files with sensitive information
-config/*.yaml
+config.yaml
 config/*.json
