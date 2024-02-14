@@ -1,42 +1,41 @@
 import time
 import logging
 import requests
-from confluent_kafka import Producer, KafkaError
+from confluent_kafka import Producer
 import pandas as pd
 from pymongo import MongoClient
+import yaml
+import os
 
 # Alpha Vantage rate limit: 5 calls per minute
 ALPHA_VANTAGE_RATE_LIMIT = 5
 ALPHA_VANTAGE_TIME_INTERVAL = 60  # seconds
-
-# Kafka configuration
-KAFKA_BROKER = 'localhost:9092'  
-KAFKA_TOPIC = 'stock-data'  
-
-# MongoDB connection
-MONGO_URI = "mongodb://localhost:27017"
-MONGO_DB = "simulator"
-MONGO_COLLECTION = "historical_data"
-
-# Initialize variables for rate limiting
-alpha_vantage_calls = 0
 alpha_vantage_last_reset_time = time.time()
+alpha_vantage_calls = 0
 
-# Initialize Kafka Producer
-kafka_producer_config = {
-    'bootstrap.servers': KAFKA_BROKER,
-}
+# Get the path to the root directory
+root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
-producer = Producer(kafka_producer_config)
+# Load configuration from config.yml in the root directory
+config_file_path = os.path.join(root_dir, "config.yml")
+with open(config_file_path, "r") as file:
+    config = yaml.safe_load(file)
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Initialize Kafka Producer
+kafka_producer_config = {
+    'bootstrap.servers': config['development']['kafka']['bootstrap_servers'],
+}
+
+producer = Producer(kafka_producer_config)
+
 def get_daily_data(symbol, outputsize='compact'):
     global alpha_vantage_calls, alpha_vantage_last_reset_time
 
-    api_key = '1DMX8XAI11JYVQC5'
+    api_key = config['development']['api_keys']['alpha_vantage']
     base_url = 'https://www.alphavantage.co/query'
     function = 'TIME_SERIES_DAILY'
 
@@ -80,16 +79,18 @@ def get_daily_data(symbol, outputsize='compact'):
                 alpha_vantage_last_reset_time = time.time()
 
             # Initialize MongoDB client
-            client = MongoClient(MONGO_URI)
+            client = MongoClient(config['development']['database']['mongodb']['uri'])
+            MONGO_COLLECTION = "historical_data"
 
             # Save the fetched data in MongoDB
-            db = client[MONGO_DB]
-            collection = db[MONGO_COLLECTION]
+            db = client[config['development']['database']['mongodb']['db_name']]
+            collection = db[MONGO_COLLECTION]  # Using collection name directly
             collection.insert_one({"symbol": symbol, "data": df.to_dict()})
             logger.info(f"Data for {symbol} saved to MongoDB.")
 
             # Send the fetched data to Kafka
-            send_to_kafka(topic=KAFKA_TOPIC, key=symbol, data=df)
+            #send_to_kafka(topic=config['development']['kafka']['topic'], key=symbol, data=df)
+            send_to_kafka(topic='historical-data', key=symbol, data=df)
 
             return df
         else:
