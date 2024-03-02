@@ -20,3 +20,12 @@ from django.urls import path
 urlpatterns = [
     path('admin/', admin.site.urls),
 ]
+
+from django.urls import path
+from .views import run_daily_stock_data
+
+urlpatterns = [
+    path('run-daily-stock-data/', run_daily_stock_data, name='run_daily_stock_data'),
+    # Add more URL patterns for other endpoints
+]
+

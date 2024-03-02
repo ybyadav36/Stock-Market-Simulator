@@ -3,15 +3,15 @@ venv/
 
 # Docker
 docker-compose.yml
-Dockerfile
+docker
 
 # IDE/Editor files
 .vscode/
 .idea/
 
 # Local data files (if any)
-data/
-
+databases/mongodb
+databases/postgres
 
 # Compiled Python files
 *.pyc
@@ -52,5 +52,5 @@ dist/
 static/
 
 # Ignore configuration files with sensitive information
-config.yaml
+config.yml
 config/*.json
