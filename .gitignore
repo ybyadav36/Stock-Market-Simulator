@@ -54,3 +54,7 @@ static/
 # Ignore configuration files with sensitive information
 config.yml
 config/*.json
+
+docker-compose-airflow.yaml
+
+node_modules/.

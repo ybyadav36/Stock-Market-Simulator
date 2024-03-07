@@ -8,14 +8,18 @@ import yaml
 import os
 
 from django.core.management.base import BaseCommand
-from Script.daily_stock_data import main as daily_stock_data_main
+from stock_market_simulator.management.commands.daily_stock_data import daily_stock_data_main
 
 class Command(BaseCommand):
-    help = 'Fetch daily data'
+    help = 'Fetch_daily_data'
 
     def handle(self, *args, **kwargs):
-        # Call the main function of your historical data fetching script
-        daily_stock_data_main()
+        try:
+            # Call the main function of your historical data fetching script
+            daily_stock_data_main()
+            self.stdout.write(self.style.SUCCESS('Successfully fetched daily data'))
+        except Exception as e:
+            self.stderr.write(self.style.ERROR(f'Error fetching daily data: {e}'))
 
 # Alpha Vantage rate limit: 5 calls per minute
 ALPHA_VANTAGE_RATE_LIMIT = 5
