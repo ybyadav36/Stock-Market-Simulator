@@ -1,0 +1,26 @@
+/* Stock Price Display Styles */
+.stock-price-display {
+    padding: 1rem;
+  }
+  
+  /* Table Styles */
+  table {
+    border-collapse: collapse;
+    width: 100%; /* Expand table to full width */
+  }
+  
+  th,
+  td {
+    border: 1px solid #ddd;
+    padding: 0.5rem 1rem;
+    text-align: left;
+  }
+  
+  th {
+    background-color: #f0f0f0;
+  }
+  
+  /* Optional Styling */
+  .stock-price-display h1 {
+    text-align: center;
+  }
